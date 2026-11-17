@@ -1616,6 +1616,11 @@ pub fn apply(ctx: &egui::Context) {
     ctx.global_style_mut(|s| {
         s.spacing.item_spacing = egui::vec2(t.space_6, t.space_4);
         s.spacing.button_padding = egui::vec2(t.space_6, t.space_3);
+        // A small movement within the same control should not restart the tooltip timer.
+        // Give the next control the same delay rather than opening it instantly (#7679).
+        s.interaction.show_tooltips_only_when_still = false;
+        s.interaction.tooltip_delay = 0.25;
+        s.interaction.tooltip_grace_time = 0.0;
     });
     // The new visuals are painted on the next pass: without a repaint request the widgets
     // keep the previous theme's colours until some other event schedules a pass (#5802).
@@ -1650,6 +1655,30 @@ mod tests {
                 assert!(ratio >= 1.5, "isoparm {ratio:.2} on the viewport background {background:?}");
             }
         }
+    }
+
+    /// Tooltips appear after a consistent short delay, even when the pointer moves within
+    /// an item; following a different item does not bypass that delay (#7679).
+    #[test]
+    fn tooltip_timing_is_consistent_while_pointer_moves() {
+        let ctx = egui::Context::default();
+        apply(&ctx);
+        let style = ctx.global_style();
+        assert!(!style.interaction.show_tooltips_only_when_still);
+        assert_eq!(style.interaction.tooltip_delay, 0.25);
+        assert_eq!(style.interaction.tooltip_grace_time, 0.0);
+
+        // Restyling the app, for example after switching themes, keeps the same timing.
+        ctx.global_style_mut(|style| {
+            style.interaction.show_tooltips_only_when_still = true;
+            style.interaction.tooltip_delay = 0.5;
+            style.interaction.tooltip_grace_time = 0.2;
+        });
+        apply(&ctx);
+        let style = ctx.global_style();
+        assert!(!style.interaction.show_tooltips_only_when_still);
+        assert_eq!(style.interaction.tooltip_delay, 0.25);
+        assert_eq!(style.interaction.tooltip_grace_time, 0.0);
     }
 
     #[test]

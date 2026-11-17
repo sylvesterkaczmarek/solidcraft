@@ -4,8 +4,8 @@
 //! - **Fixes:** the session's kernels run with this crate's fixes ([`super::fixes`]), named to
 //!   it before the first call.
 //! - **Stopping:** the token over this thread's work ([`crate::stop`]) is over the call.
-//! - **Failures:** while a dump folder is set ([`super::dump::set_dir`]), the session hands a
-//!   failed call's inputs to [`super::dump::written`].
+//! - **Failures:** while a dump folder is set ([`super::dump::set_dir`]), a failed call's
+//!   inputs are left there ([`super::dump::failed_ops`]), written only once it has failed.
 //! - **The call running now** ([`super::dump::current`]) and the profiler's span, as
 //!   [`super::run_on`] keeps them.
 //! - **Errors:** solidcore-ops' error as this crate's ([`error`]).
@@ -28,8 +28,14 @@ fn configured() {
 }
 
 /// Runs the solidcore-ops call `f`, named `call` for the profiler, the crash reports and a
-/// stopped call's error.
+/// stopped call's error ([`ops_on`] with no inputs).
 pub(crate) fn ops<T>(call: &'static str, f: impl FnOnce() -> solidcore_ops::Result<T>) -> Result<T> {
+    ops_on(call, &[], f)
+}
+
+/// [`ops`] for a call that reads the bodies `inputs`: should it fail while a dump folder is set,
+/// they are left there. They are the caller's bodies, not the copies a consuming call is handed.
+pub(crate) fn ops_on<T>(call: &'static str, inputs: super::dump::Inputs<'_>, f: impl FnOnce() -> solidcore_ops::Result<T>) -> Result<T> {
     configured();
     let stop = crate::stop::token();
     if stop.as_ref().is_some_and(solidcore_ops::cancel::CancelToken::is_cancelled) {
@@ -44,7 +50,14 @@ pub(crate) fn ops<T>(call: &'static str, f: impl FnOnce() -> solidcore_ops::Resu
         None => f(),
     };
     drop(in_flight);
-    r.map_err(|e| error(call, e, solidcore_ops::session::take_failure_detail()))
+    r.map_err(|e| {
+        let e = error(call, e, solidcore_ops::session::take_failure_detail());
+        // Stopped, it is no failure to look into.
+        if !matches!(e, Error::Cancelled(_)) {
+            super::dump::failed_ops(call, &e.to_string(), inputs);
+        }
+        e
+    })
 }
 
 /// solidcore-ops' error as this crate's: the ones this crate has a kind for as that kind, any

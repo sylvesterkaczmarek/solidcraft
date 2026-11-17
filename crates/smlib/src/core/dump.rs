@@ -27,15 +27,9 @@ thread_local! {
     pub(crate) static SERIALISED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// Where failing calls leave their inputs; `None` stops it. While a folder is set, solidcore-ops'
-/// session hands the inputs of its failed calls here too ([`written`]); with none it has no
-/// callback, so a call that consumes its operands does not write them before it runs.
+/// Where failing calls leave their inputs; `None` stops it.
 pub(crate) fn set_dir(dir: Option<PathBuf>) {
-    let hook: Option<solidcore_ops::session::Hook> = dir
-        .is_some()
-        .then(|| std::sync::Arc::new(|f: &solidcore_ops::session::Failure<'_>| written(f.call, f.why, &f.inputs)) as solidcore_ops::session::Hook);
     *DIR.lock().unwrap_or_else(PoisonError::into_inner) = dir;
-    solidcore_ops::session::set_failure_hook(hook);
 }
 
 /// `b` as a binary `.smb`.
@@ -59,9 +53,27 @@ pub(super) fn failed(k: &Kernel, call: &str, why: &str, inputs: Inputs<'_>) {
     written(call, why, &inputs);
 }
 
+/// A solidcore-ops call failed ([`super::call::ops_on`]): its `inputs`, the caller's own bodies
+/// (the call was handed copies where it consumes its operands), go to the folder as they are.
+/// They are serialised only now, so a call that answers costs nothing more than with no folder.
+pub(super) fn failed_ops(call: &str, why: &str, inputs: Inputs<'_>) {
+    if DIR.lock().unwrap_or_else(PoisonError::into_inner).is_none() {
+        return;
+    }
+    let inputs: Vec<_> = inputs
+        .iter()
+        .map(|&(what, body)| {
+            #[cfg(test)]
+            SERIALISED.with(|n| n.set(n.get() + 1));
+            (what, body.to_smb(false).map_err(|e| e.to_string()))
+        })
+        .collect();
+    written(call, why, &inputs);
+}
+
 /// A failed call's inputs, each already a binary `.smb` (or why it could not be written), go to
-/// the folder: a call this crate ran ([`failed`]), or one solidcore-ops' session ran.
-pub(super) fn written(call: &str, why: &str, inputs: &[(&'static str, std::result::Result<Vec<u8>, String>)]) {
+/// the folder.
+fn written(call: &str, why: &str, inputs: &[(&'static str, std::result::Result<Vec<u8>, String>)]) {
     let Some(dir) = DIR.lock().unwrap_or_else(PoisonError::into_inner).clone() else { return };
     let n = SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let stem = format!("{n:06}-{}", safe(call));

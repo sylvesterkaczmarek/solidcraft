@@ -23,6 +23,13 @@ fn operation(op: BooleanOp) -> ops::BooleanOp {
     }
 }
 
+/// What a failure's dump calls the first operands.
+const OPERANDS: [&str; 4] = ["a", "b", "c", "d"];
+
+fn operands<'a>(bodies: &[&'a Body]) -> Vec<(&'static str, &'a Body)> {
+    bodies.iter().enumerate().map(|(n, &b)| (OPERANDS.get(n).copied().unwrap_or("operand"), b)).collect()
+}
+
 /// Fails when a panic left an operand half-edited: it is never used again.
 fn usable(call: &'static str, bodies: &[&Body]) -> Result<()> {
     if bodies.iter().any(|b| b.kernel_left_unfinished()) {
@@ -42,7 +49,7 @@ pub(crate) fn boolean(a: &Body, b: &Body, op: BooleanOp) -> Result<Option<Body>>
     usable("SmApiBoolean", &[a, b])?;
     let mut c = copies(&[a, b])?.into_iter();
     let (Some(ca), Some(cb)) = (c.next(), c.next()) else { return Err(Error::Argument) };
-    call::ops("SmApiBoolean", || ops::boolean(ca, cb, operation(op)))
+    call::ops_on("SmApiBoolean", &operands(&[a, b]), || ops::boolean(ca, cb, operation(op)))
 }
 
 /// The kernel's operation for [`merged`].
@@ -76,7 +83,7 @@ pub(crate) fn union_all(bodies: &[&Body]) -> Result<Body> {
     }
     usable("smlib_boolean_union_all", bodies)?;
     let c = copies(bodies)?;
-    call::ops("smlib_boolean_union_all", || ops::union_all(c))
+    call::ops_on("smlib_boolean_union_all", &operands(bodies), || ops::union_all(c))
 }
 
 /// `a` op `b` for sheets of planar faces on one plane, on copies: `None` when either has no
@@ -85,7 +92,7 @@ pub(crate) fn boolean2d(a: &Body, b: &Body, op: BooleanOp) -> Result<Option<Body
     usable("SmApiBoolean2d", &[a, b])?;
     let mut c = copies(&[a, b])?.into_iter();
     let (Some(ca), Some(cb)) = (c.next(), c.next()) else { return Err(Error::Argument) };
-    call::ops("SmApiBoolean2d", || ops::boolean2d(ca, cb, operation(op)))
+    call::ops_on("SmApiBoolean2d", &operands(&[a, b]), || ops::boolean2d(ca, cb, operation(op)))
 }
 
 /// `tool`'s edges imprinted on a copy of `body`: `None` when the imprint changed nothing of it
@@ -97,6 +104,6 @@ pub(crate) fn imprint(body: &Body, tool: &Body) -> Result<Option<Body>> {
     usable("SmApiBooleanWithOptions", &[body, tool])?;
     let mut c = copies(&[body, tool])?.into_iter();
     let (Some(cb), Some(ct)) = (c.next(), c.next()) else { return Err(Error::Argument) };
-    let (imprinted, changed) = call::ops("SmApiBooleanWithOptions", || ops::imprint(cb, ct))?;
+    let (imprinted, changed) = call::ops_on("SmApiBooleanWithOptions", &operands(&[body, tool]), || ops::imprint(cb, ct))?;
     Ok(changed.then_some(imprinted))
 }

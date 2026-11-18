@@ -198,7 +198,7 @@ fn read_only_folder_allows_step_insert_but_refuses_file_writes() {
     assert!(inserted.is_ok(), "read-only insert should work: {inserted:?}");
     let output = read.join("forbidden.sc");
     let write = host.run_command("file.save_as", &json!({"path":output}));
-    assert!(matches!(write, Err(HostError::CommandFailed { .. })), "the same grant cannot save files: {write:?}");
+    assert!(matches!(&write, Err(HostError::CommandFailed { .. })), "the same grant cannot save files: {write:?}");
     assert!(!output.exists(), "no file was written under a read-only grant");
     let output = read.join("forbidden.stl");
     assert!(host.run_command("file.export_stl", &json!({"path":output})).is_err(), "export also requires write authority");

@@ -668,6 +668,7 @@ mod native {
                     view: None,
                     groups: BTreeSet::new(),
                     file_folders: Vec::new(),
+            file_read_folders: Vec::new(),
                     evaluation: None,
                 };
                 solidcraft_io::vfs::scoped(Some(solidcraft_io::vfs::PathScope::new([f.0.clone()])), || {

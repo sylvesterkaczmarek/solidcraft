@@ -3055,9 +3055,8 @@ mod tests {
     #[test]
     fn stage3_reconciliation_copies_reclassified_trims_back() {
         let mut k = Kernel::default();
-        let mut b =
-            crate::primitive::api_primitives::create_pyramid(&mut k, Vec3::ZERO, 5.0, 20.0)
-                .unwrap();
+        let mut b = crate::primitive::api_primitives::create_pyramid(&mut k, Vec3::ZERO, 5.0, 20.0)
+            .unwrap();
         let faces: Vec<_> = b.faces().iter().map(|(id, _)| id).collect();
 
         // Find a genuine face classification that prepares a missing trim.
@@ -3078,9 +3077,8 @@ mod tests {
                 .edgeuses()
                 .iter()
                 .filter_map(|(id, eu)| {
-                    (eu.uv_trim_curve.is_some()
-                        && b.edgeuse(id).unwrap().uv_trim_curve.is_none())
-                    .then_some(id)
+                    (eu.uv_trim_curve.is_some() && b.edgeuse(id).unwrap().uv_trim_curve.is_none())
+                        .then_some(id)
                 })
                 .collect();
             if new_trims.is_empty() {

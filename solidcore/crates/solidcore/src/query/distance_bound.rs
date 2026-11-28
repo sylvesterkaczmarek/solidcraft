@@ -447,7 +447,7 @@ pub fn bspline_curve_distance_lower_bound(
             .and_then(|n| n.checked_add(1))
             != Some(knots.len())
         || knots.iter().any(|x| !x.is_finite())
-        || knots.windows(2).any(|pair| pair[0] > pair[1])
+        || knots.windows(2).any(|pair| matches!(pair, [a, b] if a > b))
     {
         return Err(SolidError::invalid_input(OP, "invalid spline data"));
     }

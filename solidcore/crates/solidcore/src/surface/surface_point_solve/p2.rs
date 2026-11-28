@@ -70,7 +70,7 @@ use crate::geom::extent2d::Extent2d;
 use crate::geom::geom_utility::p1::{line_closest_point, vec_lin_comb_two_vectors};
 use crate::geom::global_solver::SolverOperation;
 use crate::geom::local_solve_nd::TerminationReason;
-use crate::geom::solution_array::{Solution, SolutionArray, SolutionObject, SortKey};
+use crate::geom::solution_array::{Solution, SolutionArray, SolutionObject, SolutionType, SortKey};
 use crate::geom::tol::is_zero;
 use crate::geom::vector2d::{Point2, Vec2};
 use crate::geom::vector3d::{sqrt, Point3};
@@ -1025,6 +1025,61 @@ impl SurfPtGlobalSolver<'_> {
     ) -> Result<SolutionArray<O>> {
         self.set_dropped_beyond_target(false);
         let mut solutions = SolutionArray::new();
+
+        // A plane is affine in its parameters. Squared distance to a point
+        // is convex on the UV rectangle, so one of its four corners is a
+        // global maximum. No local solve or sampling assumption is needed.
+        if self.base.solver_op() == SolverOperation::Maximize
+            && matches!(self.base.surface().kind(), SurfaceKind::Plane(_))
+        {
+            let domain = self.base.domain();
+            let (lo, hi) = (domain.min(), domain.max());
+            if ![lo.x, lo.y, hi.x, hi.y].iter().all(|v| v.is_finite()) || lo.x > hi.x || lo.y > hi.y
+            {
+                return Err(SolidError::invalid_input(
+                    OP_SOLVE,
+                    "invalid planar UV domain",
+                ));
+            }
+            let mut best: Option<(Point2, f64)> = None;
+            for uv in [lo, Point2::new(hi.x, lo.y), Point2::new(lo.x, hi.y), hi] {
+                let distance = self
+                    .base
+                    .surface()
+                    .evaluate_point(k, uv)?
+                    .distance(self.base.test_point());
+                if !distance.is_finite() {
+                    return Err(SolidError::invalid_input(
+                        OP_SOLVE,
+                        "nonfinite planar distance",
+                    ));
+                }
+                if best.is_none_or(|(_, d)| distance > d) {
+                    best = Some((uv, distance));
+                }
+            }
+            if let Some((uv, distance)) = best {
+                // A maximum below the target by more than the caller's tolerance
+                // cannot satisfy the request, even at the farthest corner.
+                if self
+                    .base
+                    .target_distance()
+                    .is_some_and(|target| distance + self.base.loose_tol() < target.abs())
+                {
+                    return Ok(solutions);
+                }
+                let mut sol = Solution::new();
+                sol.solution_type = SolutionType::SingleValue;
+                sol.num_variables = 2;
+                sol.num_objects = 1;
+                set_first_object(&mut sol, surface_obj);
+                *sol.start.param_mut(0)? = uv.x;
+                *sol.start.param_mut(1)? = uv.y;
+                sol.start.solution_value = distance;
+                solutions.add(&sol);
+            }
+            return Ok(solutions);
+        }
 
         // First find a rough guess.
         let mut sol: Solution<O> = Solution::new();
@@ -2402,6 +2457,64 @@ mod tests {
         assert!(
             g.calc_func_val(&k, uv).unwrap() <= g.calc_func_val(&k, Point2::new(0.9, 0.1)).unwrap()
         );
+    }
+
+    #[test]
+    fn planar_maximum_is_at_a_farthest_corner() {
+        use crate::geom::vector3d::Vec3;
+        use crate::surface::plane::Plane;
+
+        let k = Kernel::default();
+        for scale in [1e-8, 1.0, 1e8] {
+            // Nonuniform scales and a noncentral query give a unique
+            // farthest corner. The analytic plane is affine in u and v.
+            let domain = Extent2d::from_bounds(0.0, 0.0, 1.0, 1.0);
+            let s = Surface::from(Plane::new(
+                Point3::ZERO,
+                Vec3::X,
+                Vec3::Y,
+                Vec2::new(2.0 * scale, 3.0 * scale),
+                &domain,
+            ));
+            let point = Point3::new(0.5 * scale, 0.25 * scale, scale);
+            let expected = (1.5_f64 * 1.5 + 2.75 * 2.75 + 1.0).sqrt() * scale;
+            let tolerance = 1e-6 * scale;
+            let mut g = SurfPtGlobalSolver::new(
+                &k,
+                &s,
+                &domain,
+                SolverOperation::Maximize,
+                point,
+                tolerance,
+                None,
+                SolutionRequested::Single,
+            )
+            .unwrap();
+            let solutions = g.solve(&k, Some(Srf)).unwrap();
+            assert_eq!(solutions.len(), 1);
+            let sol = solutions.get(0).unwrap();
+            assert_eq!(sol.start.param(0).unwrap(), 1.0);
+            assert_eq!(sol.start.param(1).unwrap(), 1.0);
+            assert!((sol.start.solution_value - expected).abs() <= tolerance);
+            assert_eq!(sol.objects[0], Some(Srf));
+            for (target, found) in [
+                (expected - 2.0 * tolerance, true),
+                (expected + 2.0 * tolerance, false),
+            ] {
+                let mut g = SurfPtGlobalSolver::new(
+                    &k,
+                    &s,
+                    &domain,
+                    SolverOperation::Maximize,
+                    point,
+                    tolerance,
+                    Some(target),
+                    SolutionRequested::Single,
+                )
+                .unwrap();
+                assert_eq!(!g.solve(&k, Some(Srf)).unwrap().is_empty(), found);
+            }
+        }
     }
 
     #[test]

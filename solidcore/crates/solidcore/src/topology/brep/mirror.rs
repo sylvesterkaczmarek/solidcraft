@@ -448,34 +448,16 @@ fn degenerate_low_work_transform(
     }
     let input_scale = Vec3::new(row0_len, row1_len, row2_len);
     let input_transform = Axis2Placement::new(disp, x, y);
-    let mut trial = Kernel {
-        tolerances: k.tolerances,
-        fixes: k.fixes,
-        memoize_curve_caches: k.memoize_curve_caches,
-        cancel: k.cancel.clone(),
-        ..Kernel::default()
-    };
-    let mut copy = b.clone_standing_for_self()?;
-    transform_with_notifications(
-        &mut trial,
-        &mut copy,
-        &input_transform,
-        Some(input_scale),
-        scale_tolerances,
-        None,
-    )?;
-    // the geometry owners are the identities the body's naming scheme names its
-    // entities by (as `check_brep` and `standing` read them): a read body's recorded
-    // keys, not the arena references, or every edge fails its owner test
-    let naming = copy.naming();
-    let recorded = copy.geometry_owner_keys().clone();
-    let keys =
-        |e: EntityRef| crate::topology::owner_identity_of(naming, recorded.get(&e).copied(), e);
-    let valid = match check_brep_with_keys(&mut trial, &mut copy, CheckLevel::Level2, &keys) {
-        Ok(check) => check.is_valid(),
-        Err(e) if e.is_unported_or_cancelled() => return Err(e),
-        Err(_) => false,
-    };
+    let valid = matrix_trial_valid(k, b, |trial, copy| {
+        transform_with_notifications(
+            trial,
+            copy,
+            &input_transform,
+            Some(input_scale),
+            scale_tolerances,
+            None,
+        )
+    })?;
     if !valid {
         return Err(angle_error);
     }
@@ -487,6 +469,36 @@ fn degenerate_low_work_transform(
         scale_tolerances,
         notifications,
     )
+}
+
+/// Trial a potentially collapsing transform without notifying the caller or
+/// modifying the source body. Use the same Level 2 check for both matrix paths.
+fn matrix_trial_valid(
+    k: &Kernel,
+    b: &Brep,
+    edit: impl FnOnce(&mut Kernel, &mut Brep) -> Result<()>,
+) -> Result<bool> {
+    let mut trial = Kernel {
+        tolerances: k.tolerances,
+        fixes: k.fixes,
+        memoize_curve_caches: k.memoize_curve_caches,
+        cancel: k.cancel.clone(),
+        ..Kernel::default()
+    };
+    let mut copy = b.clone_standing_for_self()?;
+    edit(&mut trial, &mut copy)?;
+    // the geometry owners are the identities the body's naming scheme names its
+    // entities by (as `check_brep` and `standing` read them): a read body's recorded
+    // keys, not the arena references, or every edge fails its owner test
+    let naming = copy.naming();
+    let recorded = copy.geometry_owner_keys().clone();
+    let keys =
+        |e: EntityRef| crate::topology::owner_identity_of(naming, recorded.get(&e).copied(), e);
+    match check_brep_with_keys(&mut trial, &mut copy, CheckLevel::Level2, &keys) {
+        Ok(check) => Ok(check.is_valid()),
+        Err(e) if e.is_unported_or_cancelled() => Err(e),
+        Err(_) => Ok(false),
+    }
 }
 
 /// `SmBrep::Transform(const double[4][4], bScaleTol)`: applies the affine map
@@ -505,7 +517,9 @@ fn degenerate_low_work_transform(
 ///
 /// # Errors
 ///
-/// As upstream, every step runs even when an earlier one fails, and the error with
+/// A poorly conditioned matrix in the SVD path is first tried on a standing
+/// copy. An invalid image is refused without changing the source body.
+/// Otherwise, as upstream, every step runs even when an earlier one fails, and the error with
 /// the largest upstream status is returned; those of
 /// [`transform`](crate::topology::brep::p5::transform), [`mirror`] and
 /// [`Matrix::sv_decompose`] (whose status upstream ignores).
@@ -530,9 +544,8 @@ pub fn transform_matrix_with_notifications(
     b: &mut Brep,
     matrix: &[[f64; 4]; 4],
     scale_tolerances: bool,
-    mut notifications: Option<&mut EditNotifyEnv<'_>>,
+    notifications: Option<&mut EditNotifyEnv<'_>>,
 ) -> Result<()> {
-    const OP: &str = "topology::brep::mirror::transform_matrix";
     let [m0, m1, m2, m3] = matrix;
     // Setup 3x3 for SVD decomposition
     let row0 = Vec3::new(m0[0], m0[1], m0[2]);
@@ -581,6 +594,41 @@ pub fn transform_matrix_with_notifications(
         }
     }
 
+    // Use the same relative regularity threshold as the public body-transform
+    // operation. An unproved map can still have a valid image (e.g. a sheet),
+    // so trial the full decomposition rather than reject it on conditioning alone.
+    // The fourth column is deliberately ignored by this API.
+    let map = crate::math::Transform {
+        m: [
+            [row0.x, row0.y, row0.z, 0.0],
+            [row1.x, row1.y, row1.z, 0.0],
+            [row2.x, row2.y, row2.z, 0.0],
+            [disp.x, disp.y, disp.z, 1.0],
+        ],
+    };
+    let rows = [row0, row1, row2];
+    if !map.is_regular(1e-9).is_yes()
+        && !matrix_trial_valid(k, b, |trial, copy| {
+            transform_matrix_svd(trial, copy, rows, disp, scale_tolerances, None)
+        })?
+    {
+        return Err(SolidError::invalid_input(
+            "topology::brep::mirror::transform_matrix",
+            "near-singular transform would produce an invalid body",
+        ));
+    }
+    transform_matrix_svd(k, b, rows, disp, scale_tolerances, notifications)
+}
+
+fn transform_matrix_svd(
+    k: &mut Kernel,
+    b: &mut Brep,
+    [row0, row1, row2]: [Vec3; 3],
+    disp: Vec3,
+    scale_tolerances: bool,
+    mut notifications: Option<&mut EditNotifyEnv<'_>>,
+) -> Result<()> {
+    const OP: &str = "topology::brep::mirror::transform_matrix";
     let mut sv = Matrix::from_row_major(
         3,
         3,
@@ -1242,6 +1290,71 @@ mod tests {
         assert!(zero_length(&r), "{r:?}");
         assert_eq!(points(&b), before);
         assert_eq!(counts(&b), [6, 12, 8]);
+        assert!(level2_valid(&mut k, &mut b));
+    }
+
+    #[test]
+    fn a_near_singular_sheared_revolution_is_refused_without_mutation() {
+        use crate::geom::attribute::AttributeStore;
+        use crate::topology::brep::p10::TopologyEnv;
+        use crate::topology::brep::p7::read_from_file;
+        use crate::topology::database_io::FileType;
+        use crate::topology::topology::NotifyRecords;
+
+        let mut k = Kernel::default();
+        let mut b = Brep::new_with_infinite_region().unwrap();
+        let mut records = NotifyRecords::new();
+        let mut attributes = AttributeStore::default();
+        let mut env = TopologyEnv {
+            all_attributes: &[],
+            attributes: &mut attributes,
+            key_of: &crate::topology::loopuse::notify_ref,
+            records: &mut records,
+            next_key: 1 << 40,
+        };
+        read_from_file(
+            &mut k,
+            &mut b,
+            include_bytes!("../../../tests/data/reader-regressions/revolution.smb").to_vec(),
+            FileType::Ascii,
+            false,
+            &mut env,
+        )
+        .unwrap();
+        b.use_arena_naming().unwrap();
+        b.set_editing_enabled(true);
+        assert!(level2_valid(
+            &mut k,
+            &mut b.clone_standing_for_self().unwrap()
+        ));
+        let before = points(&b);
+        let topology = counts(&b);
+        // The reported mat0076 matrix enters the full SVD branch.
+        let matrix = [
+            [0.8058680190465212, -0.29026436029085756, 0.0, 0.0],
+            [
+                -0.10430573503780678,
+                0.141964763216248,
+                0.9843608686062126,
+                0.0,
+            ],
+            [
+                5.828353536945563e-11,
+                -7.932649432106016e-11,
+                1.7616378843798325e-11,
+                0.0,
+            ],
+            [
+                43.871017221482376,
+                4.321056959395637,
+                5.973499327348293,
+                1.0,
+            ],
+        ];
+        let result = transform_matrix(&mut k, &mut b, &matrix, true);
+        assert!(result.is_err(), "{result:?}");
+        assert_eq!(points(&b), before);
+        assert_eq!(counts(&b), topology);
         assert!(level2_valid(&mut k, &mut b));
     }
 

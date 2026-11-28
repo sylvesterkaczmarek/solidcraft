@@ -25,9 +25,9 @@
 //! against [`MAX_ENTITIES`]; a number with no digit and an integer beyond i64 are refused; a
 //! leading byte order mark is skipped; `\S\` before a UTF-8 character is kept as written.
 //!
-//! Limit: an ANCHOR, REFERENCE or SIGNATURE section (edition 3) is skipped to the first `ENDSEC;`
-//! in the raw text, so one inside a string in such a section ends the skip early and the rest is
-//! read as sections. No corpus file has these sections.
+//! Limit: ANCHOR, REFERENCE and SIGNATURE sections (edition 3) are skipped without resolving
+//! references or interpreting metadata. The section terminator must be outside quoted data,
+//! resource identifiers and comments.
 
 use std::cell::Cell;
 use std::collections::BTreeMap;
@@ -506,6 +506,53 @@ impl Lexer<'_> {
             self.fail(&format!("expected `{}`", c as char))
         }
     }
+    /// Skip an optional metadata section without interpreting its contents.
+    /// A terminator inside a string, comment or resource identifier is data.
+    fn skip_section(&mut self) -> Result<(), Error> {
+        loop {
+            self.ws()?;
+            let Some(c) = self.peek() else {
+                return self.fail("unterminated section");
+            };
+            match c {
+                b'\'' | b'"' | b'<' => {
+                    let end = if c == b'<' { b'>' } else { c };
+                    self.i += 1;
+                    loop {
+                        let Some(next) = self.peek() else {
+                            return self.fail("unterminated section");
+                        };
+                        self.i += 1;
+                        if next == end {
+                            if c == b'\'' && self.peek() == Some(end) {
+                                self.i += 1;
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                }
+                c if c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'!') => {
+                    let start = self.i;
+                    while self.peek().is_some_and(|c| {
+                        c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'!')
+                    }) {
+                        self.i += 1;
+                    }
+                    if self
+                        .s
+                        .get(start..self.i)
+                        .is_some_and(|word| word.eq_ignore_ascii_case(b"ENDSEC"))
+                        && self.eat(b';')?
+                    {
+                        return Ok(());
+                    }
+                }
+                _ => self.i += 1,
+            }
+        }
+    }
+
     fn keyword(&mut self) -> Result<String, Error> {
         self.ws()?;
         let st = self.i;
@@ -1123,15 +1170,8 @@ fn parse_limited(
                 lx.expect(b';')?;
                 return Ok(ex);
             }
-            // ANCHOR / REFERENCE / SIGNATURE sections (Part 21 edition 3): skip to the first
-            // `ENDSEC;` in the raw text (the limit in the module documentation).
-            "ANCHOR" | "REFERENCE" | "SIGNATURE" => {
-                let rest = lx.s.get(lx.i..).unwrap_or(&[]);
-                match rest.windows(7).position(|w| w == b"ENDSEC;") {
-                    Some(p) => lx.i += p + 7,
-                    None => return lx.fail("unterminated section"),
-                }
-            }
+            // Optional Part 21 edition 3 metadata is skipped, not resolved.
+            "ANCHOR" | "REFERENCE" | "SIGNATURE" => lx.skip_section()?,
             _ => return lx.fail(&format!("unexpected `{kw}`")),
         }
     }
@@ -1223,6 +1263,32 @@ ENDSEC;END-ISO-10303-21;",
     /// A DATA section holding `data`, with no header.
     fn data(data: &str) -> String {
         format!("ISO-10303-21;DATA;{data}ENDSEC;END-ISO-10303-21;")
+    }
+
+    #[test]
+    fn optional_sections_ignore_embedded_endsec() {
+        let text = concat!(
+            "ISO-10303-21;",
+            "ANCHOR;<name>=('it''s ENDSEC; inside a string');",
+            "/* ENDSEC; in a comment */ ENDSEC /* gap */ ;",
+            "REFERENCE;#2=<https://example.invalid/ENDSEC;resource>;endsec ;",
+            "DATA;#1=A();ENDSEC;END-ISO-10303-21;",
+        );
+        let ex = parse(text).unwrap();
+        assert_eq!(ex.entities.len(), 1);
+        assert_eq!(ex.get(1).unwrap().name(), "A");
+    }
+
+    #[test]
+    fn optional_section_requires_a_real_terminator() {
+        for text in [
+            "ISO-10303-21;ANCHOR;<name>='ENDSEC;';",
+            "ISO-10303-21;REFERENCE;#1=<ENDSEC;>;",
+            "ISO-10303-21;ANCHOR;/* ENDSEC; */",
+            "ISO-10303-21;ANCHOR;NOT_ENDSEC;",
+        ] {
+            assert!(matches!(parse(text), Err(Error::Syntax { .. })), "{text}");
+        }
     }
 
     /// #11650: the header is metadata, so a malformed record in it must not stop the import.

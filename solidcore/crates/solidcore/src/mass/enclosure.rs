@@ -2394,7 +2394,8 @@ fn crossings(
 
 /// A bound on the 3D length of the uv box where it lies on the net's first or last knot in
 /// one direction (`None` elsewhere). On that side the surface is the rational curve of the
-/// side's control points `P_i`: with them in a box of diameter `delta`, its derivative
+/// side's control points `P_i` supported on the intersected spans: with them in a box of
+/// diameter `delta`, its derivative
 /// `sum (N_i w_i)' (P_i - C) / W` is at most `sum |N_i'| max w delta / min w`, and
 /// `sum |N_i'| <= 2 p / h` on a knot span of length `h` (each `N_i'` is two terms of
 /// `p / (u_(i+p) - u_i)` times a basis function of degree `p - 1`). At a pole, where the
@@ -2511,9 +2512,26 @@ fn side_speed_bound(cn: &Nurbs, u: Ivl, v: Ivl) -> Option<Ivl> {
         } else {
             return None;
         };
+    // Only the control points of basis functions supported on the
+    // intersected knot spans can contribute to this part of the side.
+    // Their convex hull and weight extrema suffice for the derivative
+    // bound. Outside the knot domain the convex hull argument does not
+    // apply; leave that case to the partial-derivative enclosure.
+    if !(along.lo.is_finite()
+        && along.hi.is_finite()
+        && along.lo >= knot(knots, p as isize)
+        && along.hi <= knot(knots, n as isize)
+        && along.lo <= along.hi)
+    {
+        return None;
+    }
+    let first_span = span(knots, p, n, along.lo);
+    let last_span = span(knots, p, n, along.hi);
+    let first_point = first_span.checked_sub(p)?;
+    let count = last_span.checked_sub(first_point)?.checked_add(1)?;
     let mut hull: Option<[Ivl; 3]> = None;
     let (mut wmin, mut wmax) = (f64::INFINITY, 0.0_f64);
-    for q in pts {
+    for q in pts.into_iter().skip(first_point).take(count) {
         let (x, w) = q?;
         hull = Some(match hull {
             None => x,
@@ -2530,7 +2548,7 @@ fn side_speed_bound(cn: &Nurbs, u: Ivl, v: Ivl) -> Option<Ivl> {
     ]);
     // the shortest knot span the range meets
     let mut shortest = f64::INFINITY;
-    for k in span(knots, p, n, along.lo)..=span(knots, p, n, along.hi) {
+    for k in first_span..=last_span {
         let len = knot(knots, k as isize + 1) - knot(knots, k as isize);
         if len > 0.0 {
             shortest = shortest.min(len);
@@ -2583,6 +2601,44 @@ fn pcurve(k: &Kernel, b: &mut Brep, eu: EdgeuseId) -> Result<NurbsCurve> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn short_side_length_uses_only_active_control_points() {
+        // A short linear span followed by a long one. The far control
+        // point must not enter the length bound on the first span.
+        for (w1, w2) in [(1.0, 1.0), (2.0, 0.001)] {
+            let xs = [0.0, 1e-6, 400.0];
+            let ws = [1.0, w1, w2];
+            let net = Nurbs {
+                p: 1,
+                q: 1,
+                nu: 3,
+                nv: 2,
+                u: vec![0.0, 0.0, 1e-6, 1.0, 1.0],
+                v: vec![0.0, 0.0, 1.0, 1.0],
+                pw: xs
+                    .iter()
+                    .zip(ws)
+                    .flat_map(|(&x, w)| [x * w, 0.0, 0.0, w, x * w, w, 0.0, w])
+                    .collect(),
+            };
+            let u = Ivl::new(0.25e-6, 0.75e-6);
+            let position = |t: f64| 1e-6 * t * w1 / (1.0 - t + t * w1);
+            let exact = position(0.75) - position(0.25);
+            for side in [0.0, 1.0] {
+                let bound = side_length(&net, u, Ivl::from(side)).unwrap();
+                assert!(
+                    bound.hi >= exact && bound.hi <= 3e-6,
+                    "{bound:?}, exact={exact}"
+                );
+            }
+            let crossed = side_length(&net, Ivl::new(0.5e-6, 0.5), Ivl::from(0.0)).unwrap();
+            let t = (0.5 - 1e-6) / (1.0 - 1e-6);
+            let x = (1e-6 * w1 * (1.0 - t) + 400.0 * w2 * t) / (w1 * (1.0 - t) + w2 * t);
+            assert!(crossed.hi >= x - position(0.5), "{crossed:?}");
+            assert!(side_speed_bound(&net, Ivl::new(-0.1, 0.5), Ivl::from(0.0)).is_none());
+        }
+    }
 
     /// The relative stop test holds only of a finite enclosure within `rel` of its
     /// magnitude: an unbounded one (a cell enclosed to the whole line, where `inf <= inf`)

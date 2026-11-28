@@ -642,9 +642,9 @@ impl<O: LoopObject> HealData<O> {
                 }
             }
 
-            // when needed - compute FaceProps After Fix_SplitEdgesAtSeam() -
-            // SM_PROPSTAGE_3
-            if !p.has_props(PropStage::Stage3, p.face) {
+            // Compute stage 3 or refresh its closure verdicts against the
+            // current tolerances, including when a prior stage 3 was cached.
+            {
                 let Some(face) = p.face else {
                     return Err(no_face());
                 };

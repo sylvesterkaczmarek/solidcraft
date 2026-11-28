@@ -1769,7 +1769,11 @@ impl<O: LoopObject> FaceProps<O> {
             &mut cache,
         );
         cache.apply_uv_trim_updates(b)?;
-        result
+        result?;
+        if stage == PropStage::Stage3 {
+            self.set_props_stage3(k, b, face, face_index, exe_heal_op)?;
+        }
+        Ok(())
     }
 
     fn set_props_with_seam(
@@ -2285,7 +2289,8 @@ impl<O: LoopObject> FaceProps<O> {
         let mut cache = CurveOnClassifyCache::default();
         let result = self.set_props_stage3_cached(k, b, face, face_index, exe_heal_op, &mut cache);
         cache.apply_uv_trim_updates(b)?;
-        result
+        result?;
+        self.set_props_stage3(k, b, face, face_index, exe_heal_op)
     }
 
     /// [`FaceProps::set_props_stage3`] on the query state `cache`: what `ClassifyLoops`'
@@ -2308,6 +2313,55 @@ impl<O: LoopObject> FaceProps<O> {
         result
     }
 
+    /// Refresh closure-dependent properties when the healer has changed the
+    /// edge or vertex tolerances. Reuse the classification only if the same
+    /// loops still participate in it.
+    fn refresh_cached_loop_closure(&mut self, k: &Kernel, b: &Brep, face: FaceId) -> Result<bool> {
+        if self.prop_stage != PropStage::Stage3 || self.face != Some(face) {
+            return Ok(false);
+        }
+        let loops = face_p2::loops(b, face, false, None)?;
+        if loops.len() != self.loop_props.len() {
+            return Ok(false);
+        }
+        let mut closure = Vec::with_capacity(loops.len());
+        for (&id, lp) in loops.iter().zip(&self.loop_props) {
+            if lp.loop_ != Some(id) {
+                return Ok(false);
+            }
+            let closed_3d = Tri::from(loop_is_closed_3d(k, b, id)?);
+            let closed_ptrs = Tri::from(loop_is_closed_ptrs(k, b, id)?);
+            if lp.loopuse_type != LoopuseType::Vertexuse
+                && (lp.closed_3d.is_true() || lp.closed_ptrs.is_true())
+                    != (closed_3d.is_true() || closed_ptrs.is_true())
+            {
+                return Ok(false);
+            }
+            closure.push((closed_3d, closed_ptrs));
+        }
+        let mut changed = false;
+        let (mut bad_3d, mut bad_ptrs) = (0u64, 0u64);
+        for (lp, (closed_3d, closed_ptrs)) in self.loop_props.iter_mut().zip(closure) {
+            changed |= lp.closed_3d != closed_3d || lp.closed_ptrs != closed_ptrs;
+            lp.closed_3d = closed_3d;
+            lp.closed_ptrs = closed_ptrs;
+            lp.good_closed = Tri::from(closed_3d == closed_ptrs);
+            if lp.containment != ContainmentType::WireLoop && lp.good_closed == Tri::False {
+                if closed_3d == Tri::False {
+                    bad_3d += 1;
+                } else {
+                    bad_ptrs += 1;
+                }
+            }
+        }
+        if changed {
+            self.bad_closed_3d_loop_cnt = bad_3d;
+            self.bad_closed_ptr_loop_cnt = bad_ptrs;
+            self.bad_loop_problems = Tri::from(self.has_problems(4));
+        }
+        Ok(true)
+    }
+
     fn set_props_stage3_inner(
         &mut self,
         k: &Kernel,
@@ -2317,8 +2371,12 @@ impl<O: LoopObject> FaceProps<O> {
         exe_heal_op: HealerOpType,
         cache: &mut CurveOnClassifyCache,
     ) -> Result<()> {
-        // no work - already done or being done
-        if self.prop_stage >= PropStage::Stage3A {
+        // Preserve the reentrancy guard. A completed stage, in contrast,
+        // may have stale closure verdicts after tolerances changed.
+        if self.prop_stage == PropStage::Stage3A {
+            return Ok(());
+        }
+        if self.refresh_cached_loop_closure(k, b, face)? {
             return Ok(());
         }
 

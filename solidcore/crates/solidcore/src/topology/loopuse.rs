@@ -1940,6 +1940,45 @@ mod tests {
     }
 
     #[test]
+    fn cached_face_props_refresh_after_vertex_tolerance_growth() {
+        use crate::heal::face_props::{
+            ContainmentType, FaceProps, HealerOpType, LoopProps, PropStage, Tri,
+        };
+        let k = Kernel::default();
+        let face = FaceId::from_index(0);
+        let id = LoopId::from_index(0);
+        let corner = VertexId::from_index(2);
+        let mut b = square(3e-4);
+        let mut props = FaceProps::<crate::error::EntityRef>::for_face(face, 0);
+        props.prop_stage = PropStage::Stage3;
+        let mut lp = LoopProps::for_loop(id);
+        lp.closed_3d = Tri::from(loop_is_closed_3d(&k, &b, id, true).unwrap().unwrap().closed);
+        lp.closed_ptrs = Tri::from(loop_is_closed_ptrs(&b, id).unwrap());
+        lp.good_closed = Tri::from(lp.closed_3d == lp.closed_ptrs);
+        lp.containment = ContainmentType::OuterLoop;
+        assert_eq!(lp.closed_3d, Tri::False);
+        assert_eq!(lp.closed_ptrs, Tri::True);
+        props.loop_props.push(lp);
+        props.closed_loop_cnt = 1;
+        props.outer_loop_cnt = 1;
+        props.bad_closed_3d_loop_cnt = 1;
+        props.bad_closed_ptr_loop_cnt = 0;
+        props.bad_loop_problems = Tri::True;
+        b.vertex_mut(corner).unwrap().tolerance = 2.6e-4;
+        assert!(is_closed_3d(&k, &b, lu(0), true).unwrap().closed);
+        props
+            .set_props_stage3(&k, &b, face, 0, HealerOpType::All)
+            .unwrap();
+        assert_eq!(props.prop_stage, PropStage::Stage3);
+        assert_eq!(props.loop_props[0].closed_3d, Tri::True);
+        assert_eq!(props.loop_props[0].good_closed, Tri::True);
+        assert_eq!(props.bad_closed_3d_loop_cnt, 0);
+        assert_eq!(props.bad_closed_ptr_loop_cnt, 0);
+        assert_eq!(props.closed_loop_cnt, 1);
+        assert_eq!(props.loop_props[0].containment, ContainmentType::OuterLoop);
+    }
+
+    #[test]
     fn local_vertex_zone_closes_only_a_shared_bounded_junction() {
         let k = Kernel::default();
         let corner = VertexId::from_index(2);

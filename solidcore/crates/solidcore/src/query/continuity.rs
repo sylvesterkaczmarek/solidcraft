@@ -62,6 +62,10 @@ pub struct ContinuityAt {
     pub gap: f64,
     /// G1: the angle between the faces' unit normals in their uses' senses, radians.
     pub normal_angle: f64,
+    /// Signed normal-section curvatures across the edge, in 1/mm, for faces
+    /// a and b respectively. Each is in the sense of its own face use.
+    /// Unlike the jumps, the second curvature is not flipped for opposed normals.
+    pub curvatures: [f64; 2],
     /// G2 to G4: the jumps across the edge of the normal sections' curvature (1/mm), of its
     /// arc-length derivative (1/mm²) and of that derivative's (1/mm³).
     pub jumps: [f64; 3],
@@ -448,6 +452,7 @@ pub fn continuity_on_surfaces(
         uv: [a.uv, bb.uv],
         gap: a.foot.distance(bb.foot),
         normal_angle,
+        curvatures: [ja[0], jb[0]],
         jumps,
     }))
 }

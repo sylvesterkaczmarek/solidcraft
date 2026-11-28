@@ -103,6 +103,7 @@ fn a_box_edge_is_a_closed_right_angle_with_flat_faces() {
             let c = continuity_at(&k, &b, e, fu, t, guess).unwrap().unwrap();
             assert!(c.gap <= 1e-12, "{e:?} at {t}: gap {}", c.gap);
             assert!((c.normal_angle - FRAC_PI_2).abs() <= 1e-12, "{c:?}");
+            assert_eq!(c.curvatures, [0.0, 0.0], "both faces are flat");
             assert!(
                 c.jumps.iter().all(|&j| j == 0.0),
                 "planes bend nowhere: {c:?}"
@@ -146,6 +147,24 @@ fn a_round_between_planes_is_tangent_and_its_curvature_jumps_by_its_inverse_radi
             assert!(c.gap <= 1e-9, "{c:?}");
             assert!(c.normal_angle <= 1e-6, "{c:?}");
             assert!((c.jumps[0] - 1.0 / r).abs() <= 1e-6 / r, "{c:?}");
+            let round_side = usize::from(b.faceuse(fu[1]).unwrap().face == Some(round[0]));
+            // The outside of the convex round has negative normal curvature
+            // in its outward normal's sense. The plane has zero curvature.
+            assert!(
+                (c.curvatures[round_side] + 1.0 / r).abs() <= 1e-6 / r,
+                "{c:?}"
+            );
+            assert!(c.curvatures[1 - round_side].abs() <= 1e-12, "{c:?}");
+            let reversed =
+                continuity_at(&k, &b, e, [fu[1], fu[0]], t, [Some(c.uv[1]), Some(c.uv[0])])
+                    .unwrap()
+                    .unwrap();
+            for i in 0..2 {
+                assert!(
+                    (reversed.curvatures[i] - c.curvatures[1 - i]).abs() <= 1e-6 / r,
+                    "{reversed:?}"
+                );
+            }
             assert!(c.jumps[1] <= 1e-6 && c.jumps[2] <= 1e-6, "{c:?}");
             guess = [Some(c.uv[0]), Some(c.uv[1])];
         }

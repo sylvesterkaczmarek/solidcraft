@@ -101,6 +101,7 @@
 //! | [`TopologyFailure::MergeGaveNoVertex`] | `SM_ERR` |
 //! | [`TopologyFailure::MergedGroupNotOneFace`] | `SM_ERR` |
 //! | [`TopologyFailure::Missing`]         | `SM_ERR_NULL_POINTER`         |
+//! | [`TopologyFailure::NearSingularTrialInvalid`] | `SM_ERR_INVALID_INPUT` |
 //! | [`TopologyFailure::NewPrimaryNotOnEdge`] | `SM_ERR_INVALID_INPUT` |
 //! | [`TopologyFailure::NoBrepGiven`] | `SM_ERR_INVALID_INPUT` |
 //! | [`TopologyFailure::NoClassifiablePoint`] | `SM_ERR` |
@@ -596,6 +597,9 @@ pub enum TopologyFailure {
     /// Something the routine needs is missing, as the phrase says (for example "the
     /// edge's curve").
     Missing(&'static str),
+    /// The near-singular affine trial image did not pass the Level 2 body check.
+    /// [`ErrorKind::InvalidInput`].
+    NearSingularTrialInvalid,
     /// The edge use the caller gave as the edge's new primary is not one of the edge's.
     NewPrimaryNotOnEdge,
     /// The caller gave no B-rep. [`ErrorKind::InvalidInput`].
@@ -1238,6 +1242,7 @@ impl TopologyFailure {
             | Self::EdgeuseWithoutEdge
             | Self::InvalidValue(_)
             | Self::LoopIndexOutOfRange { .. }
+            | Self::NearSingularTrialInvalid
             | Self::NewPrimaryNotOnEdge
             | Self::NoBrepGiven
             | Self::NoCurveGiven
@@ -1343,6 +1348,7 @@ impl TopologyFailure {
             | Self::LoopWithoutNormal
             | Self::LoopsMisoriented
             | Self::LoopsNotClosedOrPlanar { .. }
+            | Self::NearSingularTrialInvalid
             | Self::NewPrimaryNotOnEdge
             | Self::NoBrepGiven
             | Self::NoCurveGiven
@@ -1649,6 +1655,9 @@ impl core::fmt::Display for TopologyFailure {
                 f.write_str("merged faces that do not leave exactly one face")
             }
             Self::Missing(what) => write!(f, "{what} is missing"),
+            Self::NearSingularTrialInvalid => {
+                f.write_str("near-singular transform would produce an invalid body")
+            }
             Self::NewPrimaryNotOnEdge => {
                 f.write_str("the new primary edge use is not one of the edge's")
             }

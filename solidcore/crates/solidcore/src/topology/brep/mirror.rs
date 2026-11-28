@@ -612,9 +612,9 @@ pub fn transform_matrix_with_notifications(
             transform_matrix_svd(trial, copy, rows, disp, scale_tolerances, None)
         })?
     {
-        return Err(SolidError::invalid_input(
+        return Err(SolidError::topology(
             "topology::brep::mirror::transform_matrix",
-            "near-singular transform would produce an invalid body",
+            TopologyFailure::NearSingularTrialInvalid,
         ));
     }
     transform_matrix_svd(k, b, rows, disp, scale_tolerances, notifications)
@@ -1352,7 +1352,12 @@ mod tests {
             ],
         ];
         let result = transform_matrix(&mut k, &mut b, &matrix, true);
-        assert!(result.is_err(), "{result:?}");
+        let error = result.unwrap_err();
+        assert_eq!(error.kind(), crate::error::ErrorKind::InvalidInput);
+        assert_eq!(
+            error.topology_failure(),
+            Some(&TopologyFailure::NearSingularTrialInvalid)
+        );
         assert_eq!(points(&b), before);
         assert_eq!(counts(&b), topology);
         assert!(level2_valid(&mut k, &mut b));

@@ -1682,6 +1682,7 @@ impl<O: LoopObject> FaceProps<O> {
             self.bad_closed_3d_loop_cnt = UNDEF_ULONG;
             self.bad_closed_ptr_loop_cnt = UNDEF_ULONG;
             self.bad_missing_poles = UNDEF_ULONG;
+            self.bad_loop_problems = Tri::Unsure;
         }
     }
 
@@ -1768,10 +1769,15 @@ impl<O: LoopObject> FaceProps<O> {
             exe_heal_op,
             &mut cache,
         );
-        cache.apply_uv_trim_updates(b)?;
+        if let Err(error) = cache.apply_uv_trim_updates(b) {
+            if self.prop_stage >= PropStage::Stage3A {
+                self.prop_stage = PropStage::Stage2;
+            }
+            return Err(error);
+        }
         result?;
         if stage == PropStage::Stage3 {
-            self.set_props_stage3(k, b, face, face_index, exe_heal_op)?;
+            self.finish_stage3_after_copyback(k, b, face, face_index, exe_heal_op)?;
         }
         Ok(())
     }
@@ -2288,9 +2294,58 @@ impl<O: LoopObject> FaceProps<O> {
     ) -> Result<()> {
         let mut cache = CurveOnClassifyCache::default();
         let result = self.set_props_stage3_cached(k, b, face, face_index, exe_heal_op, &mut cache);
-        cache.apply_uv_trim_updates(b)?;
+        if let Err(error) = cache.apply_uv_trim_updates(b) {
+            if self.prop_stage >= PropStage::Stage3A {
+                self.prop_stage = PropStage::Stage2;
+            }
+            return Err(error);
+        }
         result?;
-        self.set_props_stage3(k, b, face, face_index, exe_heal_op)
+        self.finish_stage3_after_copyback(k, b, face, face_index, exe_heal_op)
+    }
+
+    /// Reconcile Stage 3 with the tolerances actually copied onto the B-rep.
+    /// A reclassification can create trims and admit further loops. Every pass
+    /// commits its query edits, including on classification failure. Copy-back
+    /// only grows tolerances and does not change topology or edge geometry, so
+    /// a loop can enter the classified set at most once.
+    fn finish_stage3_after_copyback(
+        &mut self,
+        k: &Kernel,
+        b: &mut Brep,
+        face: FaceId,
+        face_index: u64,
+        exe_heal_op: HealerOpType,
+    ) -> Result<()> {
+        if self.prop_stage == PropStage::Stage3A {
+            return Ok(());
+        }
+        let loop_count = face_p2::loops(b, face, false, None)?.len();
+        // Each further rebuild admits at least one loop. Allow the initial
+        // reconciliation too; never publish an unstable completed cache.
+        for _ in 0..=loop_count {
+            if self.refresh_cached_loop_closure(k, b, face)? {
+                return Ok(());
+            }
+            let mut cache = CurveOnClassifyCache::default();
+            let result =
+                self.set_props_stage3_cached(k, b, face, face_index, exe_heal_op, &mut cache);
+            if let Err(error) = cache.apply_uv_trim_updates(b) {
+                self.prop_stage = PropStage::Stage2;
+                return Err(error);
+            }
+            result?;
+        }
+        if self.refresh_cached_loop_closure(k, b, face)? {
+            return Ok(());
+        }
+        self.prop_stage = PropStage::Stage2;
+        Err(SolidError::heal(
+            OP_STAGE3,
+            HealFailure::Defect {
+                why: "loop participation did not stabilize after monotone tolerance copy-back",
+            },
+        ))
     }
 
     /// [`FaceProps::set_props_stage3`] on the query state `cache`: what `ClassifyLoops`'
@@ -2699,12 +2754,9 @@ impl<O: LoopObject> FaceProps<O> {
             .wrapping_add(stop_extra);
         self.bad_unpaired_no_area_loop = Tri::from(total % 2 == 1);
 
-        // set m_bBadLoopProblems = TRUE: has at least one loop problem
-        // (4: post SetProps_Stage3 problems)
-        self.bad_loop_problems = Tri::from(self.has_problems(4));
-
-        // all done
+        // The aggregate reads Stage 3 counters only after the stage is complete.
         self.prop_stage = PropStage::Stage3;
+        self.bad_loop_problems = Tri::from(self.has_problems(4));
         Ok(())
     }
 
@@ -2998,6 +3050,69 @@ mod tests {
         assert!(!p.has_props(PropStage::Stage2, None));
         assert!(!p.has_props(PropStage::Stage3, f));
         assert!(p.has_props(PropStage::Stage0, f));
+    }
+
+    #[test]
+    fn stage3_reconciliation_copies_reclassified_trims_back() {
+        let mut k = Kernel::default();
+        let mut b =
+            crate::primitive::api_primitives::create_pyramid(&mut k, Vec3::ZERO, 5.0, 20.0)
+                .unwrap();
+        let faces: Vec<_> = b.faces().iter().map(|(id, _)| id).collect();
+
+        // Find a genuine face classification that prepares a missing trim.
+        // Keep that first classification on a snapshot, as the read-only
+        // query does. Seed a stale wire verdict to exercise reconciliation
+        // after a loop becomes eligible for classification.
+        for face in faces {
+            let mut props: FaceProps<EntityRef> = FaceProps::for_face(face, 0);
+            let mut cache = CurveOnClassifyCache::default();
+            if props
+                .set_props_stage3_cached(&k, &b, face, 0, HealerOpType::All, &mut cache)
+                .is_err()
+            {
+                continue;
+            }
+            let new_trims: Vec<_> = cache
+                .snapshot(&b)
+                .edgeuses()
+                .iter()
+                .filter_map(|(id, eu)| {
+                    (eu.uv_trim_curve.is_some()
+                        && b.edgeuse(id).unwrap().uv_trim_curve.is_none())
+                    .then_some(id)
+                })
+                .collect();
+            if new_trims.is_empty() {
+                continue;
+            }
+            let lp = props
+                .loop_props
+                .iter_mut()
+                .find(|lp| lp.loopuse_type != LoopuseType::Vertexuse)
+                .unwrap();
+            let id = lp.loop_.unwrap();
+            assert!(loop_is_closed_3d(&k, &b, id).unwrap());
+            lp.closed_3d = Tri::False;
+            lp.closed_ptrs = Tri::False;
+            lp.good_closed = Tri::True;
+            lp.containment = ContainmentType::WireLoop;
+
+            props
+                .finish_stage3_after_copyback(&k, &mut b, face, 0, HealerOpType::All)
+                .unwrap();
+            assert_eq!(props.prop_stage, PropStage::Stage3);
+            assert_eq!(props.bad_loop_problems, Tri::from(props.has_problems(4)));
+            assert!(props
+                .loop_props
+                .iter()
+                .any(|lp| lp.loop_ == Some(id) && lp.closed_3d == Tri::True));
+            assert!(new_trims
+                .iter()
+                .all(|&eu| b.edgeuse(eu).unwrap().uv_trim_curve.is_some()));
+            return;
+        }
+        panic!("pyramid has no classifiable face that prepares a missing UV trim");
     }
 
     #[test]

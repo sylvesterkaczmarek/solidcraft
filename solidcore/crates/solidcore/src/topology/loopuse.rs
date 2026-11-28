@@ -1972,6 +1972,7 @@ mod tests {
         assert_eq!(props.prop_stage, PropStage::Stage3);
         assert_eq!(props.loop_props[0].closed_3d, Tri::True);
         assert_eq!(props.loop_props[0].good_closed, Tri::True);
+        assert_eq!(props.bad_loop_problems, Tri::from(props.has_problems(4)));
         assert_eq!(props.bad_closed_3d_loop_cnt, 0);
         assert_eq!(props.bad_closed_ptr_loop_cnt, 0);
         assert_eq!(props.closed_loop_cnt, 1);

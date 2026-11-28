@@ -1656,11 +1656,7 @@ fn projected_minimum_stationary<C: CurveEvaluate + ?Sized>(
         if (from_left && t == interval.min()) || (!from_left && t == interval.max()) {
             continue;
         }
-        let values = match eval_n::<2, _>(k, curve, t, 1, from_left, false) {
-            Ok(values) => values,
-            Err(e) if e.is_unported_or_cancelled() => return Err(e),
-            Err(_) => return Ok(false),
-        };
+        let values = eval_n::<2, _>(k, curve, t, 1, from_left, false)?;
         let tangent = normal.cross(values[1]).cross(normal);
         if !projected_minimum_slope_ok(t, interval, gap, tangent, tol, from_left) {
             return Ok(false);
